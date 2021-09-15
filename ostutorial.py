@@ -5,7 +5,7 @@ import time
 # from osr_openrave import kinematics, planning
 env = orpy.Environment()
 env.SetViewer('qtcoin')
-env.Load('osr_openrave/worlds/pick_and_place.env.xml')
+env.Load('/workspace/catkin_ws/src/osr_course_pkgs/osr_openrave/worlds/pick_and_place.env.xml')
 def create_box(T, color = [0, 0.6, 0]):
   box = orpy.RaveCreateKinBody(env, '')
   box.SetName('box')
@@ -47,7 +47,6 @@ for i in range(n_layer):
       nbox_current_layer += 1
   h += 0.011
 
-
 def path_planner_and_exec(grasp):
   planner = orpy.RaveCreatePlanner(env, 'birrt') # Using bidirectional RRT
   params = orpy.Planner.PlannerParameters()
@@ -59,37 +58,39 @@ def path_planner_and_exec(grasp):
   planner.PlanPath(traj)
   return traj
 
+robot = env.GetRobots()[0]
+manipulator = robot.SetActiveManipulator('gripper')
+robot.SetActiveDOFs(manipulator.GetArmIndices())
+np.set_printoptions(precision=6, suppress=True)
+
+effector_ori_transform = manipulator.GetEndEffectorTransform()
+turn_effector_down = matrixFromAxisAngle([0,np.pi,0])
+effector_transform = np.dot(turn_effector_down,effector_ori_transform)
+
+iktype=orpy.IkParameterization.Type.Transform6D
+ikmodel = orpy.databases.inversekinematics.InverseKinematicsModel(robot, iktype=iktype)
+if not ikmodel.load():
+  ikmodel.autogenerate()
+
 number_of_boxes = 39
 while number_of_boxes > 37:
-
-  robot = env.GetRobots()[0]
-  manipulator = robot.SetActiveManipulator('gripper')
-  robot.SetActiveDOFs(manipulator.GetArmIndices())
-  np.set_printoptions(precision=6, suppress=True)
-
-  iktype=orpy.IkParameterization.Type.Transform6D
-  ikmodel = orpy.databases.inversekinematics.InverseKinematicsModel(robot, iktype=iktype)
-  if not ikmodel.load():
-    ikmodel.autogenerate()
   
+  need_to_turn = 0
+  raw_input('Press Enter to start process')
   print ('Now is box'), number_of_boxes
   box = boxes[number_of_boxes]
   box_transform = box.GetTransform()
   print box_transform
   box_transform[:3,:3] = np.transpose(box_transform[:3,:3])
 
-  effector_ori_transform = manipulator.GetEndEffectorTransform()
-
-  if number_of_boxes == 39:
-    turn_effector_down = matrixFromAxisAngle([0,np.pi,0])
-    effector_transform = np.dot(turn_effector_down,effector_ori_transform)
-
   effector_according_box = np.eye(4)
   effector_according_box[:3,:3] = np.dot(effector_transform[:3,:3], box_transform[:3,:3])
   effector_according_box[:3,3] = box_transform[:3,3]
   effector_according_box[:3,3] = np.add(effector_according_box[:3,3], np.array([0,0,0.008]))
   print effector_according_box
+
   ikparam = orpy.IkParameterization(effector_according_box, iktype)
+  from IPython.terminal import embed; ipshell=embed.InteractiveShellEmbed(config=embed.load_default_config())(local_ns=locals())
   solutions_with_col = manipulator.FindIKSolutions(ikparam, orpy.IkFilterOptions.CheckEnvCollisions)
   print solutions_with_col
   if len(solutions_with_col) == 0:
@@ -103,6 +104,7 @@ while number_of_boxes > 37:
     print("bobian la...")
 
   if len(solutions_with_col) == 0 and len(solutions_without_col) != 0:
+    need_to_turn = 1
     turn_effector_90 = matrixFromAxisAngle([0,0,np.pi/2])
     effector_according_box[:3,:3] = np.dot(effector_according_box[:3,:3], turn_effector_90[:3,:3])
     solutions_with_col = manipulator.FindIKSolutions(effector_according_box, orpy.IkFilterOptions.CheckEnvCollisions)
@@ -125,20 +127,34 @@ while number_of_boxes > 37:
     robot.Grab(box)
     robot.WaitForController(0)
 
-    # raw_input ("wait again")
-
-    effector_ori_transform = manipulator.GetEndEffectorTransform()
-    print effector_ori_transform
+    twist = np.array([0, 0, 0.001, 0, 0, 0])
+    link_idx = [l.GetName() for l in robot.GetLinks()].index('robotiq_85_base_link')
+    link_origin = robot.GetLink('robotiq_85_base_link').GetTransform()[:3,3]
+    print link_origin
+    J = np.zeros((6,6))
+    q = robot.GetActiveDOFValues()
+    for i in range(10):
+      J[:3,:] = robot.ComputeJacobianTranslation(link_idx, link_origin)[:,:6]
+      J[3:,:] = robot.ComputeJacobianAxisAngle(link_idx)[:,:6]
+      qdot = np.linalg.solve(J, twist)
+      print qdot
+      q[:6] += qdot
+      robot.SetActiveDOFValues(q)
+      # raw_input('Press Enter for next differential IK step')
+      time.sleep(0.1)
 
     destination_stack = destination0.GetTransform()
     effector_according_dest0 = np.eye(4)
     effector_according_dest0[:3,:3] = np.dot(effector_transform[:3,:3], destination_stack[:3,:3])
     effector_according_dest0[:3,3] = destination_stack[:3,3] + np.array([0,0,0.025*(40-number_of_boxes)])
+    if need_to_turn == 1:
+      turn_effector_90 = matrixFromAxisAngle([0,0,np.pi/2])
+      effector_according_dest0[:3,:3] = np.dot(effector_according_dest0[:3,:3], turn_effector_90[:3,:3])
+
     ikparam = orpy.IkParameterization(effector_according_dest0, iktype)
     solutions_for_dest = manipulator.FindIKSolutions(ikparam, orpy.IkFilterOptions.CheckEnvCollisions)
     print solutions_for_dest
 
-    # robot.SetActiveDOFValues(solutions_for_dest[0])
     qplace = solutions_for_dest[0]
     traj = path_planner_and_exec(qplace)
     controller = robot.GetController()
